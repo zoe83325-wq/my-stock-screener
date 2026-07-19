@@ -2,8 +2,8 @@ name: Daily Stock Scan
 
 on:
   schedule:
-    # 每日 UTC 13:00 = 台灣時間 21:00（晚間九點）
-    - cron: "0 13 * * *"
+    # 週日、週一至週四 UTC 13:00 = 台灣時間 21:00（晚間九點）
+    - cron: "0 13 * * 0,1,2,3,4"
   workflow_dispatch: {}
 
 permissions:
