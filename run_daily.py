@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""每日排程進入點：跑選股掃描、更新收盤紀錄、產生報告並用 Telegram 推播。"""
+"""每日排程進入點：跑選股掃描、更新收盤紀錄、產生報告並用 Gmail 寄送。"""
 
 import datetime as dt
 import os
@@ -8,7 +8,7 @@ import pandas as pd
 
 from screener import run_screener
 from stock_list import STOCK_LIST
-from notify_telegram import send_telegram_message
+from notify_email import send_email
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CLOSING_HISTORY_CSV = os.path.join(DATA_DIR, "closing_history.csv")
@@ -59,9 +59,10 @@ def build_report(df: pd.DataFrame) -> str:
 
 
 def main():
+    today_str = dt.date.today().strftime("%Y-%m-%d")
     df = run_screener(STOCK_LIST, debug=False)
     if df.empty:
-        send_telegram_message("台股選股報告：今日所有股票均抓取資料失敗，請檢查資料源。")
+        send_email(f"台股選股報告 {today_str}（資料抓取失敗）", "今日所有股票均抓取資料失敗，請檢查資料源。")
         return
 
     update_closing_history(df)
@@ -71,7 +72,7 @@ def main():
     with open(LATEST_REPORT_MD, "w", encoding="utf-8") as f:
         f.write(report)
 
-    send_telegram_message(report)
+    send_email(f"台股選股報告 {today_str}", report)
     print("\n" + report)
 
 
