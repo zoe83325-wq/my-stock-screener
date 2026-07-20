@@ -1,2 +1,12 @@
 __pycache__/
 *.pyc
+
+# 環境變數與機密檔案（預防性排除，即使目前尚未使用）
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
