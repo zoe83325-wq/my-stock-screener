@@ -53,6 +53,7 @@ def build_report(df: pd.DataFrame) -> str:
         lines.append("三大法人連3日買超但其他條件未到位（觀察名單）：")
         for _, row in partial.iterrows():
             lines.append(f"- {row['code']} {row['name']}　收盤 {row['close']}")
+            lines.append(f"　　營收動能：{row['revenue_signal']}")
 
     lines.append("")
     lines.append("＊營收動能僅為最新一期月營收 YoY/MoM 參考，用於輔助判斷真突破/假突破，非篩選條件。")
