@@ -3,7 +3,7 @@
 台股選股核心邏輯（TWSE 上市 + TPEx 上櫃 官方 API，無爬蟲）
 ========================================================
 邏輯：
-1. 帶量突破 5MA 或 20MA           <- 資料源：TWSE OpenAPI / TPEx 官方個股日成交資訊
+1. MA5 首次向上黃金交叉 MA10 或 MA20，交叉後3日內任一天帶量 <- 資料源：TWSE OpenAPI / TPEx 官方個股日成交資訊
 2. 三大法人連續三日買超            <- 資料源：TWSE 官方 T86 / TPEx 官方三大法人買賣明細
 3. 整體線型趨勢為多頭排列          <- 資料源：TWSE OpenAPI / TPEx 官方個股日成交資訊
 
@@ -20,6 +20,8 @@ import requests
 import urllib3
 import pandas as pd
 
+from revenue import fetch_all_monthly_revenue
+
 # TPEx（www.tpex.org.tw）的憑證鏈缺少 Subject Key Identifier 擴展，
 # Python 的憑證驗證會嚴格拒絕（Windows 內建憑證庫較寬鬆才沒事），故對 TPEx 請求關閉憑證驗證。
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -29,6 +31,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ----------------------------------------------------------------------------
 
 VOLUME_MULTIPLIER = 1.5      # 「帶量」定義：當日量 > 20日均量 * 此倍數
+CROSSOVER_LOOKBACK_DAYS = 3  # MA5黃金交叉MA10/MA20後，允許在這幾個交易日內任一天出現帶量
 CONSECUTIVE_DAYS = 3         # 三大法人連續買超天數
 HISTORY_MONTHS = 3           # 每檔股票抓取的歷史價量月數
 REQUEST_SLEEP = 1.0          # 對外請求時的延遲秒數（請勿調太低，避免對官方網站造成負擔）
@@ -208,17 +211,40 @@ def get_institutional_net_buy_series(code: str, per_day: Dict[dt.date, Dict[str,
 # 指標計算
 # ----------------------------------------------------------------------------
 
-def check_volume_breakout(hist: pd.DataFrame) -> bool:
-    if len(hist) < 21:
+def check_ma_crossover_breakout(hist: pd.DataFrame) -> bool:
+    """判斷近 CROSSOVER_LOOKBACK_DAYS 個交易日內，是否有 MA5 首次向上黃金交叉 MA10 或 MA20，
+    且從交叉當天到今天之間，至少有一天帶量（成交量 > 20日均量 * VOLUME_MULTIPLIER）。
+
+    只要求「交叉後幾天內帶量」而非「交叉當天必須帶量」，
+    因為真正的帶量突破常常是交叉發生（趨勢轉折）之後才出現，而非同一天。
+    """
+    min_len = 20 + CROSSOVER_LOOKBACK_DAYS + 1
+    if len(hist) < min_len:
         return False
     hist = hist.sort_values("date").reset_index(drop=True)
     hist["ma5"] = hist["close"].rolling(5).mean()
+    hist["ma10"] = hist["close"].rolling(10).mean()
     hist["ma20"] = hist["close"].rolling(20).mean()
     hist["vol_ma20"] = hist["volume"].rolling(20).mean()
-    last = hist.iloc[-1]
-    breakout_price = (last["close"] > last["ma5"]) or (last["close"] > last["ma20"])
-    breakout_volume = last["volume"] > last["vol_ma20"] * VOLUME_MULTIPLIER
-    return bool(breakout_price and breakout_volume)
+
+    above_ma10 = hist["ma5"] > hist["ma10"]
+    above_ma20 = hist["ma5"] > hist["ma20"]
+    # shift() 會讓布林序列的 dtype 變成 object，若不先轉回 bool，~ 會變成位元運算而非邏輯反相
+    prev_above_ma10 = above_ma10.shift(1).fillna(False).astype(bool)
+    prev_above_ma20 = above_ma20.shift(1).fillna(False).astype(bool)
+    crossed_ma10 = above_ma10 & ~prev_above_ma10
+    crossed_ma20 = above_ma20 & ~prev_above_ma20
+    hist["crossed"] = crossed_ma10 | crossed_ma20
+    hist["breakout_volume"] = hist["volume"] > hist["vol_ma20"] * VOLUME_MULTIPLIER
+
+    recent = hist.iloc[-CROSSOVER_LOOKBACK_DAYS:]
+    for i in range(len(recent)):
+        if not bool(recent.iloc[i]["crossed"]):
+            continue
+        since_cross = recent.iloc[i:]
+        if bool(since_cross["breakout_volume"].any()):
+            return True
+    return False
 
 
 def check_trend_bullish(hist: pd.DataFrame) -> bool:
@@ -252,13 +278,16 @@ class ScreenResult:
     date: str = ""
     close: float = 0.0
     volume: float = 0.0
-    volume_breakout: bool = False
+    ma_crossover: bool = False
     institutional_3d: bool = False
     trend_bullish: bool = False
+    revenue_yoy: Optional[float] = None
+    revenue_mom: Optional[float] = None
+    revenue_signal: str = ""
 
     @property
     def passed(self) -> bool:
-        return all([self.volume_breakout, self.institutional_3d, self.trend_bullish])
+        return all([self.ma_crossover, self.institutional_3d, self.trend_bullish])
 
 
 def run_screener(stock_list: List[str], debug: bool = False) -> pd.DataFrame:
@@ -287,6 +316,9 @@ def run_screener(stock_list: List[str], debug: bool = False) -> pd.DataFrame:
         time.sleep(REQUEST_SLEEP)
         per_day_institutional[d] = {**twse_day, **tpex_day}
 
+    print("抓取月營收資料（TWSE + TPEx 官方，僅最新一期）...")
+    revenue_map = fetch_all_monthly_revenue()
+
     all_results: List[ScreenResult] = []
 
     for code in stock_list:
@@ -308,9 +340,9 @@ def run_screener(stock_list: List[str], debug: bool = False) -> pd.DataFrame:
             close=float(last["close"]),
             volume=float(last["volume"]),
         )
-        r.volume_breakout = check_volume_breakout(hist)
+        r.ma_crossover = check_ma_crossover_breakout(hist)
         r.trend_bullish = check_trend_bullish(hist)
-        print(f"  條件1 帶量突破均線: {r.volume_breakout}")
+        print(f"  條件1 MA5黃金交叉MA10/MA20(交叉後3日內帶量): {r.ma_crossover}")
         print(f"  條件3 多頭排列:     {r.trend_bullish}")
 
         inst_series = get_institutional_net_buy_series(code, per_day_institutional)
@@ -318,6 +350,14 @@ def run_screener(stock_list: List[str], debug: bool = False) -> pd.DataFrame:
             print(f"  三大法人買賣超 最近5日:\n{inst_series.tail(5)}")
         r.institutional_3d = check_consecutive_net_buy(inst_series)
         print(f"  條件2 三大法人連3日買超: {r.institutional_3d}")
+
+        growth = revenue_map.get(code)
+        if growth is not None:
+            r.revenue_yoy = growth.yoy_pct
+            r.revenue_mom = growth.mom_pct
+        r.revenue_signal = growth.signal if growth is not None else "查無營收資料"
+        print(f"  營收動能（僅供參考，非必要條件）: {r.revenue_signal}")
+
         print(f"  >>> 全部條件通過: {r.passed}")
 
         all_results.append(r)
@@ -325,7 +365,7 @@ def run_screener(stock_list: List[str], debug: bool = False) -> pd.DataFrame:
     df = pd.DataFrame([r.__dict__ for r in all_results])
     if not df.empty:
         df["passed"] = df.apply(
-            lambda row: bool(row["volume_breakout"] and row["institutional_3d"] and row["trend_bullish"]),
+            lambda row: bool(row["ma_crossover"] and row["institutional_3d"] and row["trend_bullish"]),
             axis=1,
         )
     return df

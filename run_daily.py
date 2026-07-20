@@ -45,6 +45,7 @@ def build_report(df: pd.DataFrame) -> str:
         lines.append(f"符合全部三項條件（共 {len(passed)} 檔）：")
         for _, row in passed.iterrows():
             lines.append(f"- {row['code']} {row['name']}　收盤 {row['close']}")
+            lines.append(f"　　營收動能：{row['revenue_signal']}")
 
     partial = df[(~df["passed"]) & (df["institutional_3d"])]
     if not partial.empty:
@@ -54,6 +55,7 @@ def build_report(df: pd.DataFrame) -> str:
             lines.append(f"- {row['code']} {row['name']}　收盤 {row['close']}")
 
     lines.append("")
+    lines.append("＊營收動能僅為最新一期月營收 YoY/MoM 參考，用於輔助判斷真突破/假突破，非篩選條件。")
     lines.append("＊本報告僅為技術面資料整理，不構成投資建議。")
     return "\n".join(lines)
 
